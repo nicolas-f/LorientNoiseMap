@@ -1,0 +1,58 @@
+plugins {
+    id 'java'
+}
+
+
+plugins {
+    id 'groovy'
+}
+
+group 'org.noise_planet'
+version '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+}
+
+dependencies {
+    compile 'org.codehaus.groovy:groovy-all:2.5.7'
+    compile group: 'com.opencsv', name: 'opencsv', version: '4.1'
+    testCompile group: 'junit', name: 'junit', version: '4.12'
+    compile fileTree(include: ['*.jar'], dir: 'libs')
+}
+
+task runScript(type: JavaExec) {
+    description 'Run NoiseModelling'
+    jvmArgs = ['-Xms2048m']
+    classpath sourceSets.main.runtimeClasspath
+    main = "org.noise_planet.roademission.Main"
+    if (project.hasProperty('workdir')) {
+        // Pass command-line argument to script.
+        args project.getProperty('workdir')
+    }
+}
+
+task runScriptSA(type: JavaExec) {
+    description 'Run NoiseModelling Sensitivy Analysis'
+    jvmArgs = ['-Xms2048m']
+    classpath sourceSets.main.runtimeClasspath
+    main = "org.noise_planet.roademission.MainSA"
+    if (project.hasProperty('workdir')) {
+        // Pass command-line argument to script.
+        args project.getProperty('workdir')
+    }
+}
+
+defaultTasks 'runScript'
+version '3.0.0-SNAPSHOT'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testCompile group: 'junit', name: 'junit', version: '4.12'
+}
