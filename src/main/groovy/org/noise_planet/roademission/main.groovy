@@ -1,30 +1,28 @@
 package org.noise_planet.roademission
 
-import com.opencsv.CSVWriter
+
+import groovy.sql.BatchingPreparedStatementWrapper
 import groovy.sql.Sql
 import groovy.transform.CompileStatic
 import groovy.transform.SourceURI
 import org.h2gis.api.EmptyProgressVisitor
 import org.h2gis.api.ProgressVisitor
 import org.h2gis.functions.io.csv.CSVDriverFunction
+import org.h2gis.functions.io.dbf.DBFWrite
 import org.h2gis.functions.io.shp.SHPRead
 import org.h2gis.functions.io.shp.SHPWrite
 import org.h2gis.utilities.SFSUtilities
-import org.h2gis.utilities.wrapper.ConnectionWrapper
 import org.noise_planet.noisemodelling.propagation.ComputeRays
 import org.noise_planet.noisemodelling.propagation.ComputeRaysOut
 import org.noise_planet.noisemodelling.propagation.IComputeRaysOut
 import org.noise_planet.noisemodelling.propagation.RootProgressVisitor
 import org.noise_planet.noisemodelling.propagation.jdbc.PointNoiseMap
-import java.nio.file.Path
-import java.nio.file.Paths
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.sql.Connection
-import java.sql.DriverManager
-import java.text.DateFormat
-import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 
 /**
@@ -98,7 +96,7 @@ class Main {
         // Création du dossier de résultats s'ils n'existe pas
         String outputPath = outputRootPath + "/" + zone_name + '_' + formatter.format(the_date) + "/"
         File dataOutDir = new File(outputPath)
-        dataOutDir.mkdir()
+        dataOutDir.mkdirs()
 
         // Create spatial database
         String databasePath = projectPath+"database"
@@ -120,7 +118,6 @@ class Main {
         SHPRead.readShape(connection, inputPath+in_building_table_name+".shp", nm_building_table_name.toUpperCase())
         SHPRead.readShape(connection, inputPath+in_area_table_name+".shp", nm_area_table_name.toUpperCase())
         sql.execute("CREATE SPATIAL INDEX ON "+nm_building_table_name.toUpperCase()+"(THE_GEOM);")
-        SHPWrite.exportTable(connection, outputPath+nm_building_table_name+".shp", nm_building_table_name.toUpperCase())
         logger.info("\t  -> Building file loaded")
 
         // Load or create receivers points
@@ -128,7 +125,6 @@ class Main {
         logger.info("\t| Read receivers file")
         SHPRead.readShape(connection, inputPath+in_receivers_table_name+".shp", nm_receivers_table_name.toUpperCase())
         sql.execute("CREATE SPATIAL INDEX ON "+nm_receivers_table_name.toUpperCase()+"(THE_GEOM);")
-        SHPWrite.exportTable(connection, outputPath+nm_receivers_table_name+".shp", nm_receivers_table_name.toUpperCase())
         logger.info("\t  -> Receivers file loaded")
 
         // Load roads
@@ -146,14 +142,12 @@ class Main {
         sql.execute("ALTER TABLE "+nm_traffic_table_name.toUpperCase()+" ALTER COLUMN ID SET NOT NULL;")
         sql.execute("ALTER TABLE "+nm_traffic_table_name.toUpperCase()+" ADD PRIMARY KEY (ID);")
         sql.execute("CREATE SPATIAL INDEX ON "+nm_traffic_table_name.toUpperCase()+"(THE_GEOM);")
-        SHPWrite.exportTable(connection, outputPath+nm_traffic_table_name+".shp", nm_traffic_table_name.toUpperCase())
         logger.info("\t  -> Road file loaded")
 
         // Load ground type
         logger.info("\t| Read ground surface categories")
         SHPRead.readShape(connection, inputPath+in_land_use_table_name+".shp", nm_land_use_table_name.toUpperCase())
         sql.execute("CREATE SPATIAL INDEX ON "+nm_land_use_table_name.toUpperCase()+"(THE_GEOM);")
-        SHPWrite.exportTable(connection, outputPath+nm_land_use_table_name+".shp", nm_land_use_table_name.toUpperCase())
         logger.info("\t  -> Surface categories file loaded")
 
         // Load Topography
@@ -162,7 +156,6 @@ class Main {
         sql.execute("DROP TABLE TOPOGRAPHY if exists;")
         sql.execute("CREATE TABLE "+nm_topo_table_name.toUpperCase()+" AS SELECT ST_UpdateZ(THE_GEOM, CONTOUR) AS the_geom from DEM;")
         sql.execute("CREATE SPATIAL INDEX ON "+nm_topo_table_name.toUpperCase()+"(THE_GEOM);")
-        SHPWrite.exportTable(connection, outputPath+nm_topo_table_name+".shp", nm_topo_table_name.toUpperCase())
         logger.info("\t  -> Topography file loaded")
 
         logger.info("Computations")
@@ -191,62 +184,64 @@ class Main {
         List<ComputeRaysOut.verticeSL> allSoundLevels = new ArrayList<>()
         try {
             storageFactory.openPathOutputFile(new File(outputPath, "rays.gz").absolutePath)
-            RootProgressVisitor progressLogger = new RootProgressVisitor(2, true, 1)
-            pointNoiseMap.initialize(connection, progressLogger)
+            RootProgressVisitor progressLogger = new RootProgressVisitor(1, true, 1)
+            pointNoiseMap.initialize(connection, new EmptyProgressVisitor())
             progressLogger.endStep()
             // Set of already processed receivers
             Set<Long> receivers = new HashSet<>()
             ProgressVisitor progressVisitor = progressLogger.subProcess(pointNoiseMap.getGridDim()*pointNoiseMap.getGridDim())
+            Map<Integer, double[]> receiversLden = new HashMap<>()
+            Map<Integer, double[]> receiversLn = new HashMap<>()
             for (int i = 0; i < pointNoiseMap.getGridDim(); i++) {
                 for (int j = 0; j < pointNoiseMap.getGridDim(); j++) {
                     logger.info("\t    ... compute i=" + i.toString() + ", j= " +j.toString() )
                     IComputeRaysOut out = pointNoiseMap.evaluateCell(connection, i, j, progressVisitor, receivers)
-                    if (out instanceof ComputeRaysOut) {
-                        allSoundLevels.addAll(((ComputeRaysOut) out).getVerticesSoundLevel())
+                    if (out instanceof PropagationPathStorage) {
+                        // Aggregate lden spectrums by receiver
+                        ((PropagationPathStorage) out).getReceiversLden().each { ComputeRaysOut.verticeSL v ->
+                            if (!Double.isNaN(v.value[0])) {
+                                if (receiversLden.containsKey(v.receiverId)) {
+                                    double[] recSoundLevel = ComputeRays.sumDbArray(v.value, receiversLden.get(v.receiverId))
+                                    receiversLden.replace((int)v.receiverId, recSoundLevel)
+                                } else {
+                                    receiversLden.put((int)v.receiverId, v.value)
+                                }
+                            }
+                        }
+                        // Aggregate ln spectrums by receiver
+                        ((PropagationPathStorage) out).getReceiversLn().each { ComputeRaysOut.verticeSL v ->
+                            if (!Double.isNaN(v.value[0])) {
+                                if (receiversLn.containsKey(v.receiverId)) {
+                                    double[] recSoundLevel = ComputeRays.sumDbArray(v.value, receiversLn.get(v.receiverId))
+                                    receiversLn.replace((int)v.receiverId, recSoundLevel)
+                                } else {
+                                    receiversLn.put((int)v.receiverId, v.value)
+                                }
+                            }
+                        }
                     }
                 }
             }
             logger.info("\t  -> Source-receiver rays and related Lden and Ln computed")
 
-            logger.info("\t| Compute global sound levels at receivers...")
-            Map<Integer, double[]> recSoundLevels = new HashMap<>()
-            for (int i=0;i< allSoundLevels.size() ; i++) {
-                int idReceiver = (Integer) allSoundLevels.get(i).receiverId
-                int idSource = (Integer) allSoundLevels.get(i).sourceId
-                double[] recSoundLevel = allSoundLevels.get(i).value
-                if (!Double.isNaN(recSoundLevel[0])) {
-                    if (recSoundLevels.containsKey(idReceiver)) {
-                        recSoundLevel = ComputeRays.sumDbArray(recSoundLevel, recSoundLevels.get(idReceiver))
-                        recSoundLevels.replace(idReceiver, recSoundLevel)
-                    } else {
-                        recSoundLevels.put(idReceiver, recSoundLevel)
-                    }
-                }
-            }
-//            for (int i=0;i< allSoundLevels.size() ; i++) {
-//                int idReceiver = (Integer) allSoundLevels.get(i).receiverId
-//                int idSource = (Integer) allSoundLevels.get(i).sourceId
-//                List<PropagationPath> propagationPaths = new ArrayList<>()
-//                double[] recSoundLevel = allSoundLevels.get(i).value
-//                if (recSoundLevels.containsKey(idReceiver)) {
-//                    recSoundLevel = ComputeRays.sumDbArray(recSoundLevel, recSoundLevels.get(idReceiver))
-//                    recSoundLevels.replace(idReceiver, recSoundLevel)
-//                } else {
-//                    recSoundLevels.put(idReceiver, recSoundLevel)
-//                }
-//            }
-            logger.info("\t  -> Global sound levels at receivers computed")
 
-            logger.info("\t| Write Lden to csv file...")
-            CSVWriter csvWriter = new CSVWriter(new FileWriter(outputPath+"/ReceiversLden.csv"))
-            for (Map.Entry<Integer, double[]> entry : recSoundLevels.entrySet()) {
-                Integer key = entry.getKey()
-                double[] value = entry.getValue()
-                csvWriter.writeNext([key.toString(), ComputeRays.wToDba(ComputeRays.sumArray(ComputeRays.dbaToW(value))).toString()] as String[])
+            logger.info("\t| Write Lden to base..")
+            //CSVWriter csvWriter = new CSVWriter(new FileWriter(outputPath+"/ReceiversLden.csv"))
+
+            sql.execute("DROP TABLE IF EXISTS receivers_lden")
+            sql.execute("CREATE TABLE receivers_lden(id serial, lden double, ln double)")
+            sql.withBatch("INSERT INTO receivers_lden VALUES (:id, :lden, :ln)") { BatchingPreparedStatementWrapper batch ->
+                for (int key : receiversLden.keySet()) {
+                    // Compute global value
+                    double lden = ComputeRays.wToDba(ComputeRays.sumArray(ComputeRays.dbaToW(receiversLden.get(key))))
+                    double ln = ComputeRays.wToDba(ComputeRays.sumArray(ComputeRays.dbaToW(receiversLn.get(key))))
+                    batch.addBatch([id: key, lden: lden as Double , ln: ln as Double ])
+                }
+                batch.executeBatch()
             }
-            // closing csvWriter connection
-            csvWriter.close()
-            logger.info("\t  -> csv file generated")
+            logger.info("\t  -> receivers_lden table generated")
+            // Export table
+            DBFWrite.exportTable(connection, new File(outputPath,"receivers_lden.dbf").absolutePath , "receivers_lden".toUpperCase())
 
 //            // Sound levels at receivers
 //            sql.execute("DROP TABLE "+nm_receivers_att_day_table+", "+nm_receiver_lvl_evening_table+", "+nm_receiver_lvl_night_table+" IF EXISTS;")

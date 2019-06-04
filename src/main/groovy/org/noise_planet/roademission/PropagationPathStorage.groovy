@@ -19,6 +19,8 @@ class PropagationPathStorage extends ComputeRaysOut {
     // Thread safe queue object
     protected TrafficPropagationProcessData inputData
     ConcurrentLinkedDeque<PointToPointPaths> pathQueue
+    public List<ComputeRaysOut.verticeSL> receiversLden = Collections.synchronizedList(new ArrayList())
+    public List<ComputeRaysOut.verticeSL> receiversLn = Collections.synchronizedList(new ArrayList())
 
     PropagationPathStorage(PropagationProcessData inputData, PropagationProcessPathData pathData, ConcurrentLinkedDeque<PointToPointPaths> pathQueue) {
         super(false, pathData, inputData)
@@ -29,6 +31,10 @@ class PropagationPathStorage extends ComputeRaysOut {
     @Override
     double[] addPropagationPaths(long sourceId, double sourceLi, long receiverId, List<PropagationPath> propagationPath) {
         return new double[0]
+    }
+
+    TrafficPropagationProcessData getInputData() {
+        return inputData
     }
 
     @Override
@@ -43,12 +49,21 @@ class PropagationPathStorage extends ComputeRaysOut {
             lDen[i] = 10*Math.log10( (12.0D/24.0D)*Math.pow(10.0D, soundLevelDay[i]/10.0D)
                                     +(4.0D/24.0D)*Math.pow(10.0D, (soundLevelEve[i]+5.0D)/10.0D)
                                     +(8.0D/24.0D)*Math.pow(10.0D, (soundLevelNig[i]+10.0D)/10.0D))
-//            lN[i] = soundLevelNig[i]
+            lN[i] = soundLevelNig[i]
         }
+
+        receiversLden.add(new ComputeRaysOut.verticeSL(inputData.receiversPk.get((int)receiverId), inputData.sourcesPk.get((int)sourceId), lDen))
+        receiversLn.add(new ComputeRaysOut.verticeSL(inputData.receiversPk.get((int)receiverId), inputData.sourcesPk.get((int)sourceId), lN))
+
         return lDen
-//        double[] attenuation = super.computeAttenuation(pathData, sourceId, sourceLi, receiverId, propagationPath)
-//        double[] soundLevel = ComputeRays.wToDba(ComputeRays.multArray(inputData.wjSourcesD.get((int)sourceId), ComputeRays.dbaToW(attenuation)))
-//        return soundLevel
+    }
+
+    List<verticeSL> getReceiversLden() {
+        return receiversLden
+    }
+
+    List<verticeSL> getReceiversLn() {
+        return receiversLn
     }
 
     @Override
@@ -88,8 +103,6 @@ class PropagationPathStorage extends ComputeRaysOut {
             }
             double[] aGlobalMeteo = propagationPathStorage.computeAttenuation(propagationPathStorage.genericMeteoData, sourceId, sourceLi, receiverId, propagationPath);
             if (aGlobalMeteo != null && aGlobalMeteo.length > 0)  {
-
-                propagationPathStorage.receiversAttenuationLevels.add(new ComputeRaysOut.verticeSL(paths.receiverId, paths.sourceId, aGlobalMeteo))
                 return aGlobalMeteo
             } else {
                 return new double[0]
